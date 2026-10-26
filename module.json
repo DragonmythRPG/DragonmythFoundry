@@ -1,0 +1,13 @@
+{
+  "id": "dragonmyth-sync",
+  "title": "Dragonmyth Character Sync (Prototype)",
+  "description": "Creates and synchronizes one D&D 5e 2024 character with the Dragonmyth website.",
+  "version": "0.1.0",
+  "compatibility": {
+    "minimum": "14",
+    "verified": "14"
+  },
+  "esmodules": [
+    "scripts/main.js"
+  ]
+}
