@@ -2,7 +2,7 @@
   "id": "dragonmyth-sync",
   "title": "Dragonmyth Character Sync (Prototype)",
   "description": "Creates and synchronizes one D&D 5e 2024 character with the Dragonmyth website.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "url": "https://github.com/DragonmythRPG/DragonmythFoundry",
   "manifest": "https://raw.githubusercontent.com/DragonmythRPG/DragonmythFoundry/main/module.json",
   "download": "https://github.com/DragonmythRPG/DragonmythFoundry/releases/latest/download/dragonmyth-sync.zip",

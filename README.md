@@ -1,8 +1,8 @@
 # Dragonmyth Foundry VTT module
 
 This opt-in prototype connects one Dragonmyth website character to one Actor
-in one Foundry world. It targets Foundry VTT 14 and D&D 5e 6.0.6. Only the
-character's name and current/maximum HP synchronize.
+in one Foundry world. It targets Foundry VTT 14 and D&D 5e 6.0.6. The website
+is authoritative for same-field conflicts; disjoint changes sync both ways.
 
 ## Install from Foundry
 
@@ -26,16 +26,23 @@ disposable world before using it with live characters.
 
 1. On the website, sign in and open an editable D&D 5e (2024) character.
    Select **Pair with Foundry** and copy its one-time code. The character's
-   saved name and HP initialize the Foundry Actor.
+   mapped character data initializes the Foundry Actor.
 2. As the Foundry GM, enter the website URL and code under **Configure
    Settings → Module Settings → Dragonmyth Character Sync**.
 3. Reload the world as GM and choose the Foundry player who should own the
    Actor. The module creates or reuses the linked Actor and starts syncing.
-4. Change the character name or HP on either side; the other side should
-   reflect it within about 15 seconds.
+4. Change a mapped field on either side; the other side should reflect the
+   update within about 15 seconds. If both sides changed the same field, the
+   website value takes priority.
 
 The pairing code expires after ten minutes. The GM's Foundry client must stay
-connected for sync to run. Only name, current HP, and maximum HP synchronize.
+connected for sync to run. The current mapping includes the D&D 5e (2024)
+fields supported by the website adapter: name, race, class and level,
+background, alignment, biography (including private notes), abilities and
+proficiencies, hit points, movement, inspiration, death saves, currency,
+equipment, features, feats, spells, conditions, and effects. Unrelated
+Foundry-only data is left untouched. The module keeps private notes out of
+Foundry's separate public biography field.
 
 ## Publishing a release
 
@@ -45,7 +52,7 @@ installable version:
 1. Update `version` in `module.json`.
 2. Commit and push the change to `main`.
 3. Publish a **stable** GitHub release with a tag matching the version, for
-   example `v0.1.0`. Do not mark it as a prerelease; GitHub's `latest` download
+   example `v0.2.0`. Do not mark it as a prerelease; GitHub's `latest` download
    URL excludes prereleases.
 4. Wait for the **Package Foundry module release** workflow to finish. It
    validates the tag and attaches `dragonmyth-sync.zip` to the release.
@@ -57,5 +64,6 @@ workflow has attached the asset. If a release was published as a prerelease,
 edit it to clear the prerelease setting; the workflow packages edited stable
 releases. You can also run the workflow manually with the existing release tag.
 
-Account linking is not implemented yet. The proposed approach and its security
-limits are in the [account-linking design](https://github.com/DragonmythRPG/DragonmythFoundry/blob/main/ACCOUNT_LINKING.md).
+Website/Discord-to-Foundry-user account linking is not implemented yet. The
+proposed approach and its security limits are in the
+[account-linking design](https://github.com/DragonmythRPG/DragonmythFoundry/blob/main/ACCOUNT_LINKING.md).
