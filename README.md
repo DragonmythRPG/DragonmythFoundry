@@ -1,8 +1,11 @@
 # Dragonmyth Foundry VTT module
 
-This repository contains the `dragonmyth-sync` Foundry VTT module. Copy this
-repository's contents into Foundry's `Data/modules/dragonmyth-sync` directory,
-then enable the module in a supported world.
+This opt-in prototype connects one Dragonmyth website character to one Actor
+in one Foundry world. It targets Foundry VTT 14 and D&D 5e 6.0.6. Only the
+character's name and current/maximum HP synchronize.
 
-See the shared project documentation for setup details:
-[Foundry character sync](https://github.com/BritaKit/dragonmyth-services/blob/main/docs/FOUNDRY_SYNC.md).
+Copy this repository's contents into Foundry's
+`Data/modules/dragonmyth-sync` directory, enable **Dragonmyth Character Sync
+(Prototype)** in a test world, and follow the module settings to pair a
+website character. Use HTTPS except for localhost testing, and try it in a
+disposable world before using it with live characters.
