@@ -69,23 +69,25 @@ const SYNCED_SYSTEM_DATA_FIELDS = [
 ];
 let ready = false;
 let syncTimer = null;
-let syncBusy = false;
-let syncPaused = false;
+const syncBusyLinks = new Set();
+const syncPausedLinks = new Set();
 let pairingBusy = false;
-let activeLink = null;
+const activeLinks = new Map();
 let lastNotificationAt = 0;
 
-function tokenKey() {
-  return `${TOKEN_KEY_PREFIX}${game.world.id}:${game.user.id}`;
+function tokenKey(characterId) {
+  return `${TOKEN_KEY_PREFIX}${game.world.id}:${game.user.id}:${characterId}`;
 }
 
 function saveLink(link) {
-  sessionStorage.setItem(tokenKey(), JSON.stringify(link));
+  sessionStorage.setItem(tokenKey(link.characterId), JSON.stringify(link));
 }
 
-function readLink() {
-  const saved = sessionStorage.getItem(tokenKey());
-  if (!saved) return null;
+function removeSavedLink(link) {
+  sessionStorage.removeItem(tokenKey(link.characterId));
+}
+
+function readStoredLink(key, saved) {
   try {
     const link = JSON.parse(saved);
     if (
@@ -105,9 +107,39 @@ function readLink() {
     }
     return link;
   } catch (error) {
-    sessionStorage.removeItem(tokenKey());
+    sessionStorage.removeItem(key);
     throw error;
   }
+}
+
+function readLinks() {
+  const links = new Map();
+  const legacyKey = `${TOKEN_KEY_PREFIX}${game.world.id}:${game.user.id}`;
+  const prefix = `${legacyKey}:`;
+  const keys = [];
+  for (let index = 0; index < sessionStorage.length; index += 1) {
+    const key = sessionStorage.key(index);
+    if (key?.startsWith(prefix)) keys.push(key);
+  }
+  for (const key of keys) {
+    const saved = sessionStorage.getItem(key);
+    if (!saved) continue;
+    const link = readStoredLink(key, saved);
+    if (String(link.characterId) !== key.slice(prefix.length)) {
+      sessionStorage.removeItem(key);
+      throw new Error("A saved Foundry link is stored under the wrong character key.");
+    }
+    links.set(String(link.characterId), link);
+  }
+
+  const legacy = sessionStorage.getItem(legacyKey);
+  if (legacy) {
+    const link = readStoredLink(legacyKey, legacy);
+    links.set(String(link.characterId), link);
+    saveLink(link);
+    sessionStorage.removeItem(legacyKey);
+  }
+  return links;
 }
 
 function siteUrl() {
@@ -617,15 +649,16 @@ function traitLabel(value, category, currentValues) {
     String(value).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (letter) => letter.toUpperCase());
 }
 
-function saveBaseline(character, actor) {
+function saveBaseline(link, character, actor) {
   const website = websiteState(character);
-  activeLink.version = character.version;
-  activeLink.syncSchemaVersion = SYNC_SCHEMA_VERSION;
-  activeLink.baseline = {
+  link.version = character.version;
+  link.syncSchemaVersion = SYNC_SCHEMA_VERSION;
+  link.baseline = {
     website,
     actor: snapshot(actor, website),
   };
-  saveLink(activeLink);
+  activeLinks.set(String(link.characterId), link);
+  saveLink(link);
 }
 
 function notifyError(error) {
@@ -636,9 +669,122 @@ function notifyError(error) {
   }
 }
 
+function currentLinkForActor(actorUuid) {
+  return [...activeLinks.values()].find((link) => link.actorUuid === actorUuid) || null;
+}
+
+async function confirmUnlink(title, message, label = "Unlink") {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    new Dialog({
+      title,
+      content: `<p>${foundry.utils.escapeHTML(message)}</p>`,
+      buttons: {
+        unlink: { label, callback: () => finish(true) },
+        cancel: { label: "Cancel", callback: () => finish(false) },
+      },
+      default: "cancel",
+      close: () => finish(false),
+    }).render(true);
+  });
+}
+
+async function unlinkLink(link, { actor = null, revokeRemote = true, notify = true } = {}) {
+  if (revokeRemote) {
+    try {
+      await request("/link", {
+        method: "DELETE",
+        token: link.token,
+        baseUrl: link.websiteUrl,
+        body: { worldId: link.worldId, actorUuid: link.actorUuid },
+      });
+    } catch (error) {
+      if (error.status !== 401) throw error;
+    }
+  }
+
+  const key = String(link.characterId);
+  const current = activeLinks.get(key);
+  if (current?.token === link.token) {
+    activeLinks.delete(key);
+    removeSavedLink(link);
+  }
+  syncPausedLinks.delete(key);
+  syncBusyLinks.delete(key);
+
+  if (actor && String(actor.getFlag(MODULE_ID, "websiteCharacterId")) === key) {
+    await actor.unsetFlag(MODULE_ID, "websiteCharacterId");
+    await actor.setFlag(MODULE_ID, "unlinkedWebsiteCharacterId", link.characterId);
+  }
+  if (notify) ui.notifications.info("The Foundry link was removed. The Actor and website character were kept.");
+}
+
+async function unlinkActor(actor) {
+  const link = currentLinkForActor(actor.uuid);
+  if (!link) {
+    ui.notifications.warn("This Actor is not linked in the current GM browser session. Unlink it from the website character sheet or the GM session that paired it.");
+    return;
+  }
+  const confirmed = await confirmUnlink(
+    "Unlink Dragonmyth character",
+    `Stop syncing ${actor.name} with its website character? Both records and their data will remain.`,
+  );
+  if (!confirmed) return;
+  await unlinkLink(link, { actor });
+}
+
+async function unlinkAllCurrentSession() {
+  if (!game.user.isGM) {
+    ui.notifications.error("Only a Foundry GM can unlink Dragonmyth Actors.");
+    return;
+  }
+  const links = [...activeLinks.values()];
+  if (!links.length) {
+    ui.notifications.info("There are no Dragonmyth links stored in this GM browser session for this world.");
+    return;
+  }
+  const confirmed = await confirmUnlink(
+    "Unlink all Dragonmyth Actors",
+    `Revoke ${links.length} link(s) known to this GM browser session in the current world? The Actors and website characters will be kept.`,
+    "Unlink all",
+  );
+  if (!confirmed) return;
+
+  let unlinked = 0;
+  const failures = [];
+  for (const link of links) {
+    try {
+      let actor = null;
+      try {
+        actor = await fromUuid(link.actorUuid);
+      } catch (error) {
+        console.error(`Could not resolve Actor ${link.actorUuid} while unlinking:`, error);
+      }
+      await unlinkLink(link, { actor, notify: false });
+      unlinked += 1;
+    } catch (error) {
+      console.error(`Could not unlink website character ${link.characterId}:`, error);
+      failures.push(link.characterId);
+    }
+  }
+  if (failures.length) {
+    ui.notifications.warn(`Unlinked ${unlinked} Actor(s); ${failures.length} link(s) could not be revoked. See the console.`);
+  } else {
+    ui.notifications.info(`Unlinked ${unlinked} Actor(s). Their records and data were kept.`);
+  }
+}
+
 function findLinkedActor(characterId) {
+  const wantedId = String(characterId);
   return game.actors.contents.find(
-    (actor) => actor.getFlag(MODULE_ID, "websiteCharacterId") === characterId,
+    (actor) =>
+      String(actor.getFlag(MODULE_ID, "websiteCharacterId")) === wantedId ||
+      String(actor.getFlag(MODULE_ID, "unlinkedWebsiteCharacterId")) === wantedId,
   ) || null;
 }
 
@@ -814,6 +960,8 @@ async function pairFromSettings() {
         body: { worldId: game.world.id, actorUuid: targetActor.uuid },
       });
       await applyWebsiteState(targetActor, character);
+      await targetActor.setFlag(MODULE_ID, "websiteCharacterId", character.id);
+      await targetActor.unsetFlag(MODULE_ID, "unlinkedWebsiteCharacterId");
     } catch (error) {
       if (createdActor) {
         try {
@@ -824,7 +972,7 @@ async function pairFromSettings() {
       }
       throw error;
     }
-    activeLink = {
+    const link = {
       token: paired.token,
       actorUuid: targetActor.uuid,
       characterId: character.id,
@@ -833,8 +981,9 @@ async function pairFromSettings() {
       syncSchemaVersion: SYNC_SCHEMA_VERSION,
       baseline: null,
     };
-    syncPaused = false;
-    saveBaseline(character, targetActor);
+    activeLinks.set(String(character.id), link);
+    syncPausedLinks.delete(String(character.id));
+    saveBaseline(link, character, targetActor);
     await game.settings.set(MODULE_ID, "pairingCode", "");
     ui.notifications.info(
       `${character.name} is linked to Foundry. The website’s mapped character data was used as the initial state.`,
@@ -886,24 +1035,33 @@ async function applyWebsiteState(actor, character) {
   }
 }
 
-async function reconcile() {
-  if (!activeLink || syncBusy || syncPaused) return;
-  syncBusy = true;
+async function reconcile(link) {
+  const key = String(link.characterId);
+  if (
+    activeLinks.get(key)?.token !== link.token ||
+    syncBusyLinks.has(key) ||
+    syncPausedLinks.has(key)
+  ) {
+    return;
+  }
+  syncBusyLinks.add(key);
   try {
-    const actor = await fromUuid(activeLink.actorUuid);
+    const actor = await fromUuid(link.actorUuid);
     if (!actor || actor.documentName !== "Actor") {
-      throw new Error("The linked Foundry Actor could not be found.");
+      await unlinkLink(link, { notify: false });
+      ui.notifications.warn("The linked Actor was deleted, so its website sync link was removed. Generate a new pairing code to import it again.");
+      return;
     }
     const { character } = await request("/state", {
-      token: activeLink.token,
-      baseUrl: activeLink.websiteUrl,
+      token: link.token,
+      baseUrl: link.websiteUrl,
     });
     assertSyncState(character);
     const remote = websiteState(character);
-    const baseline = activeLink.baseline;
+    const baseline = link.baseline;
     if (!baseline) {
       await applyWebsiteState(actor, character);
-      saveBaseline(character, actor);
+      saveBaseline(link, character, actor);
       return;
     }
 
@@ -917,8 +1075,8 @@ async function reconcile() {
     if (decision.acceptedLocalChanges.length) {
       const result = await request("/state", {
         method: "PATCH",
-        token: activeLink.token,
-        baseUrl: activeLink.websiteUrl,
+        token: link.token,
+        baseUrl: link.websiteUrl,
         body: {
           expectedVersion: character.version,
           changes: decision.changes,
@@ -929,22 +1087,31 @@ async function reconcile() {
       if (decision.conflicts.length) {
         ui.notifications.info("The website version took priority for fields changed on both sides.");
       }
-      saveBaseline(saved, actor);
+      saveBaseline(link, saved, actor);
       return;
     }
     if (decision.websiteChanges.length) await applyWebsiteState(actor, character);
-    saveBaseline(character, actor);
+    saveBaseline(link, character, actor);
   } catch (error) {
+    if (error.status === 401) {
+      try {
+        const actor = await fromUuid(link.actorUuid);
+        await unlinkLink(link, { actor, revokeRemote: false, notify: false });
+      } catch (cleanupError) {
+        console.error("Could not clear the locally stored Foundry link:", cleanupError);
+      }
+      ui.notifications.warn("The website link is no longer active. The local sync link was cleared and the Actor was kept.");
+      return;
+    }
     if (
-      error.status === 401 ||
       error.status === 403 ||
       (error.status === 409 && !error.message.startsWith("This character was changed somewhere else."))
     ) {
-      syncPaused = true;
+      syncPausedLinks.add(key);
     }
     notifyError(error);
   } finally {
-    syncBusy = false;
+    syncBusyLinks.delete(key);
   }
 }
 
@@ -954,10 +1121,56 @@ function relevantUpdate(changes) {
     Object.hasOwn(changes, "flags");
 }
 
+function reconcileActiveLinks() {
+  for (const link of activeLinks.values()) void reconcile(link);
+}
+
 function startSync() {
   if (syncTimer) clearInterval(syncTimer);
-  void reconcile();
-  syncTimer = setInterval(() => void reconcile(), SYNC_INTERVAL_MS);
+  reconcileActiveLinks();
+  syncTimer = setInterval(reconcileActiveLinks, SYNC_INTERVAL_MS);
+}
+
+function addActorUnlinkControl(app, controls, applicationV2 = false) {
+  if (!game.user.isGM) return;
+  const actor = app.document || app.object || app.actor;
+  if (
+    !actor ||
+    (!actor.getFlag(MODULE_ID, "websiteCharacterId") && !currentLinkForActor(actor.uuid))
+  ) {
+    return;
+  }
+  const onClick = () => void unlinkActor(actor).catch(notifyError);
+  const control = {
+    class: "dragonmyth-unlink",
+    icon: "fas fa-link-slash",
+    label: "Unlink from Dragonmyth",
+    onClick,
+  };
+  if (applicationV2) {
+    if (Array.isArray(controls.dropdown)) controls.dropdown.unshift(control);
+    else if (Array.isArray(controls.inline)) controls.inline.unshift(control);
+    else if (Array.isArray(controls)) controls.unshift(control);
+    return;
+  }
+  if (Array.isArray(controls)) {
+    controls.unshift({ ...control, onclick: onClick });
+  }
+}
+
+async function handleUnlinkAllSetting(value) {
+  if (!value) return;
+  try {
+    await unlinkAllCurrentSession();
+  } catch (error) {
+    notifyError(error);
+  } finally {
+    try {
+      await game.settings.set(MODULE_ID, "unlinkAll", false);
+    } catch (error) {
+      notifyError(error);
+    }
+  }
 }
 
 Hooks.once("init", () => {
@@ -980,15 +1193,29 @@ Hooks.once("init", () => {
       if (ready) void pairFromSettings();
     },
   });
+  game.settings.register(MODULE_ID, "unlinkAll", {
+    name: "Unlink all Dragonmyth Actors",
+    hint: "Revoke every link stored in this GM browser session for this world. Keeps all Actors and website characters.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) => {
+      if (value) void handleUnlinkAllSetting(value);
+    },
+  });
 });
 
 Hooks.once("ready", () => {
   ready = true;
   if (!game.user.isGM) return;
   try {
-    activeLink = readLink();
-    if (activeLink) {
-      activeLink.websiteUrl = siteUrl();
+    const website = siteUrl();
+    for (const link of readLinks().values()) {
+      link.websiteUrl = website;
+      activeLinks.set(String(link.characterId), link);
+    }
+    if (activeLinks.size) {
       startSync();
     } else {
       ui.notifications.info(
@@ -1001,15 +1228,42 @@ Hooks.once("ready", () => {
   }
 });
 
-Hooks.on("updateActor", (actor, changes) => {
-  if (
-    !game.user.isGM ||
-    !activeLink ||
-    syncPaused ||
-    actor.uuid !== activeLink.actorUuid ||
-    !relevantUpdate(changes)
-  ) {
-    return;
-  }
-  void reconcile();
+Hooks.on("getActorSheetHeaderButtons", (app, buttons) => {
+  addActorUnlinkControl(app, buttons);
 });
+
+Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
+  addActorUnlinkControl(app, controls, true);
+});
+
+Hooks.on("updateActor", (actor, changes) => {
+  if (!game.user.isGM || !relevantUpdate(changes)) return;
+  const link = currentLinkForActor(actor.uuid);
+  if (link) void reconcile(link);
+});
+
+Hooks.on("deleteActor", (actor) => {
+  if (!game.user.isGM) return;
+  const link = currentLinkForActor(actor.uuid);
+  if (!link) return;
+  void unlinkLink(link, { notify: false })
+    .then(() => ui.notifications.warn("A linked Actor was deleted, so its website sync link was removed."))
+    .catch(notifyError);
+});
+
+function syncFromEmbeddedDocument(document) {
+  if (!game.user.isGM || !document.parent) return;
+  const link = currentLinkForActor(document.parent.uuid);
+  if (link) void reconcile(link);
+}
+
+for (const hook of [
+  "createItem",
+  "updateItem",
+  "deleteItem",
+  "createActiveEffect",
+  "updateActiveEffect",
+  "deleteActiveEffect",
+]) {
+  Hooks.on(hook, syncFromEmbeddedDocument);
+}

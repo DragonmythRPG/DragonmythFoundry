@@ -34,6 +34,10 @@ disposable world before using it with live characters.
 4. Change a mapped field on either side; the other side should reflect the
    update within about 15 seconds. If both sides changed the same field, the
    website value takes priority.
+5. To stop syncing, use **Unlink from Foundry** on the website character or
+   the Foundry Actor sheet. Both records and their data remain. The module
+   settings also include an **Unlink all Dragonmyth Actors** control for links
+   stored by the current GM browser session in the current world.
 
 The pairing code expires after ten minutes. The GM's Foundry client must stay
 connected for sync to run. The current mapping includes the D&D 5e (2024)
@@ -43,6 +47,8 @@ proficiencies, hit points, movement, inspiration, death saves, currency,
 equipment, features, feats, spells, conditions, and effects. Unrelated
 Foundry-only data is left untouched. The module keeps private notes out of
 Foundry's separate public biography field.
+If an Actor is deleted, the module detects the missing document and revokes
+its stale link instead of retrying the deleted reference.
 
 ## Publishing a release
 
