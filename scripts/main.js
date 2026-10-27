@@ -1164,6 +1164,152 @@ async function handleUnlinkAllSetting(value) {
   }
 }
 
+function foundryUserRoles() {
+  return [
+    { label: "Player", value: CONST.USER_ROLES.PLAYER },
+    { label: "Trusted Player", value: CONST.USER_ROLES.TRUSTED },
+    { label: "Assistant Gamemaster", value: CONST.USER_ROLES.ASSISTANT },
+    { label: "Gamemaster", value: CONST.USER_ROLES.GAMEMASTER },
+  ];
+}
+
+function readPasswordDialog(dialog, fields) {
+  const form = dialog.element?.querySelector("form");
+  if (!form) return {};
+  const values = Object.fromEntries(new FormData(form).entries());
+  form.querySelectorAll('input[type="password"]').forEach((input) => {
+    input.value = "";
+  });
+  return Object.fromEntries(fields.map((field) => [field, values[field] ?? ""]));
+}
+
+async function createFoundryUser() {
+  if (!game.user.isGM) throw new Error("Only a Foundry GM can create users.");
+  const roles = foundryUserRoles();
+  const options = roles
+    .map(({ label, value }) =>
+      `<option value="${value}"${value === CONST.USER_ROLES.PLAYER ? " selected" : ""}>${label}</option>`,
+    )
+    .join("");
+  const form = await foundry.applications.api.DialogV2.wait({
+    window: { title: "Create Foundry user" },
+    content: `<form>
+      <div class="form-group"><label for="dragonmyth-user-name">Username</label><input id="dragonmyth-user-name" name="name" type="text" autocomplete="username" required></div>
+      <div class="form-group"><label for="dragonmyth-user-role">Role</label><select id="dragonmyth-user-role" name="role">${options}</select></div>
+      <div class="form-group"><label for="dragonmyth-user-password">Password</label><input id="dragonmyth-user-password" name="password" type="password" autocomplete="new-password" required></div>
+      <div class="form-group"><label for="dragonmyth-user-confirm-password">Confirm password</label><input id="dragonmyth-user-confirm-password" name="confirmation" type="password" autocomplete="new-password" required></div>
+    </form>`,
+    buttons: [
+      {
+        action: "create",
+        label: "Create user",
+        default: true,
+        callback: (_event, _button, dialog) =>
+          readPasswordDialog(dialog, ["name", "role", "password", "confirmation"]),
+      },
+      { action: "cancel", label: "Cancel" },
+    ],
+    rejectClose: false,
+  });
+  if (!form || form === "cancel") return;
+
+  const name = String(form.name || "").trim();
+  const role = Number(form.role);
+  if (!name) throw new Error("Enter a username for the new Foundry user.");
+  if (!roles.some((option) => option.value === role)) {
+    throw new Error("Choose a valid Foundry user role.");
+  }
+  if (!form.password) throw new Error("Enter a password for the new Foundry user.");
+  if (form.password !== form.confirmation) {
+    throw new Error("The password confirmation does not match.");
+  }
+
+  let password = form.password;
+  form.password = "";
+  form.confirmation = "";
+  try {
+    const user = await User.create({ name, role, password });
+    if (!user) throw new Error("Foundry did not return the created user.");
+    ui.notifications.info(
+      `Created Foundry user "${user.name}" with the ${roles.find((option) => option.value === role).label} role. Verify the password at the Foundry login screen.`,
+    );
+  } finally {
+    password = "";
+  }
+}
+
+async function changeFoundryUserPassword() {
+  if (!game.user.isGM) throw new Error("Only a Foundry GM can change user passwords.");
+  const users = game.users.contents.filter((user) => user.id !== game.user.id);
+  if (!users.length) {
+    ui.notifications.info("Create another Foundry user before changing its password.");
+    return;
+  }
+  const escape = foundry.utils.escapeHTML;
+  const roleLabels = new Map(foundryUserRoles().map(({ label, value }) => [value, label]));
+  const options = users
+    .map((user) => {
+      const label = `${user.name} (${roleLabels.get(user.role) || "Other role"})`;
+      return `<option value="${escape(user.id)}">${escape(label)}</option>`;
+    })
+    .join("");
+  const form = await foundry.applications.api.DialogV2.wait({
+    window: { title: "Set Foundry user password" },
+    content: `<form>
+      <div class="form-group"><label for="dragonmyth-target-user">User</label><select id="dragonmyth-target-user" name="userId">${options}</select></div>
+      <div class="form-group"><label for="dragonmyth-new-password">New password</label><input id="dragonmyth-new-password" name="password" type="password" autocomplete="new-password" required></div>
+      <div class="form-group"><label for="dragonmyth-confirm-password">Confirm password</label><input id="dragonmyth-confirm-password" name="confirmation" type="password" autocomplete="new-password" required></div>
+    </form>`,
+    buttons: [
+      {
+        action: "change",
+        label: "Set password",
+        default: true,
+        callback: (_event, _button, dialog) =>
+          readPasswordDialog(dialog, ["userId", "password", "confirmation"]),
+      },
+      { action: "cancel", label: "Cancel" },
+    ],
+    rejectClose: false,
+  });
+  if (!form || form === "cancel") return;
+
+  const user = game.users.get(String(form.userId || ""));
+  if (!user || user.id === game.user.id) {
+    throw new Error("Choose another existing Foundry user.");
+  }
+  if (!form.password) throw new Error("Enter a new password.");
+  if (form.password !== form.confirmation) {
+    throw new Error("The password confirmation does not match.");
+  }
+
+  let password = form.password;
+  form.password = "";
+  form.confirmation = "";
+  try {
+    await user.update({ password });
+    ui.notifications.info(`Submitted a password update for "${user.name}". Verify it at the Foundry login screen.`);
+  } finally {
+    password = "";
+  }
+}
+
+async function handleUserManagementSetting(setting, value, action) {
+  if (!value) return;
+  try {
+    if (!game.user.isGM) throw new Error("Only a Foundry GM can manage user accounts.");
+    await action();
+  } catch (error) {
+    notifyError(error);
+  } finally {
+    try {
+      await game.settings.set(MODULE_ID, setting, false);
+    } catch (error) {
+      notifyError(error);
+    }
+  }
+}
+
 Hooks.once("init", () => {
   game.settings.register(MODULE_ID, "websiteUrl", {
     name: "Dragonmyth website URL",
@@ -1194,6 +1340,26 @@ Hooks.once("init", () => {
     onChange: (value) => {
       if (value) void handleUnlinkAllSetting(value);
     },
+  });
+  game.settings.register(MODULE_ID, "createUser", {
+    name: "Create Foundry user (Prototype)",
+    hint: "GM only. Creates a user in this world with the selected role and password. Passwords are not stored by the module or sent to the Website.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) =>
+      void handleUserManagementSetting("createUser", value, createFoundryUser),
+  });
+  game.settings.register(MODULE_ID, "changeUserPassword", {
+    name: "Set Foundry user password (Prototype)",
+    hint: "GM only. Changes another user's password in this world. Passwords are not stored by the module or sent to the Website.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) =>
+      void handleUserManagementSetting("changeUserPassword", value, changeFoundryUserPassword),
   });
 });
 

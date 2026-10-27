@@ -50,6 +50,14 @@ Foundry's separate public biography field.
 If an Actor is deleted, the module detects the missing document and revokes
 its stale link instead of retrying the deleted reference.
 
+## World user management prototype
+
+The module settings include GM-only controls to create a user in the current
+world or change another user's password. These controls are a manual API
+prototype; they are not yet linked to a website campaign or its member roster.
+The password is entered in Foundry and is not saved by the module or sent to
+the Website. Test with disposable accounts in a test world.
+
 ## Publishing a release
 
 The manifest URL stays the same for installs and updates. To publish an
