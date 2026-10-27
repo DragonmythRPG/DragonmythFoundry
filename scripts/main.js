@@ -1,10 +1,14 @@
 import { resolveSyncChanges } from "./sync-state.mjs";
+import {
+  getSyncFlag,
+  MODULE_ID,
+  normalizeSyncActorData,
+  normalizeSyncFlags,
+} from "./sync-flags.mjs";
 
-const MODULE_ID = "dragonmyth-sync";
 const SYNC_INTERVAL_MS = 15_000;
 const TOKEN_KEY_PREFIX = `${MODULE_ID}:token:`;
 const SYNC_SCHEMA_VERSION = 2;
-const WEBSITE_FLAG_SCOPE = "dragonmyth";
 const PRIVATE_NOTES_HEADING = "Dragonmyth Private Notes";
 const DND5E_CONDITIONS = [
   "blinded",
@@ -254,7 +258,7 @@ function splitBiography(html, fallbackNotes) {
 }
 
 function sourceIndex(document, group) {
-  const key = document.getFlag(WEBSITE_FLAG_SCOPE, "websiteSourceKey");
+  const key = getSyncFlag(document, "websiteSourceKey");
   const match = typeof key === "string" && new RegExp(`^${group}:(\\d+)$`).exec(key);
   return match ? Number(match[1]) : null;
 }
@@ -268,7 +272,7 @@ function readWebsiteConditions(actor) {
   return DND5E_CONDITIONS.filter((condition) => {
     const key = `conditions:${condition}`;
     const document = actor.effects.contents.find(
-      (effect) => effect.getFlag(WEBSITE_FLAG_SCOPE, "websiteSourceKey") === key,
+      (effect) => getSyncFlag(effect, "websiteSourceKey") === key,
     ) || actor.effects.get(conditionDocumentId(condition));
     return document && !document.disabled;
   });
@@ -298,9 +302,9 @@ function readManagedEntries(documents, group, baseline, convert) {
 
 function itemToWebsite(document, baseline) {
   const system = document.system || {};
-  const sourceType = document.getFlag(WEBSITE_FLAG_SCOPE, "websiteSourceType");
-  const websiteItemData = document.getFlag(WEBSITE_FLAG_SCOPE, "websiteItemData") || baseline.itemData;
-  const websiteArmorData = document.getFlag(WEBSITE_FLAG_SCOPE, "websiteArmorData") || baseline.armorData;
+  const sourceType = getSyncFlag(document, "websiteSourceType");
+  const websiteItemData = getSyncFlag(document, "websiteItemData") || baseline.itemData;
+  const websiteArmorData = getSyncFlag(document, "websiteArmorData") || baseline.armorData;
   const result = {
     ...baseline,
     name: document.name,
@@ -531,7 +535,7 @@ function snapshot(actor, baseline) {
     if (Number.isInteger(value)) state.abilities[ability] = value;
   }
 
-  const biographyFlags = actor.getFlag(WEBSITE_FLAG_SCOPE, "biography") || {};
+  const biographyFlags = getSyncFlag(actor, "biography") || {};
   for (const field of ["hair", "eyes", "skin", "height", "weight", "age", "gender"]) {
     if (typeof details[field] === "string") state.biography[field] = details[field];
   }
@@ -576,7 +580,7 @@ function snapshot(actor, baseline) {
     .filter(({ level }) => level === "expertise")
     .map(({ skill }) => skill);
   const classItem = actor.items.contents.find(
-    (item) => item.getFlag(WEBSITE_FLAG_SCOPE, "websiteSourceKey") === "classes:0",
+    (item) => getSyncFlag(item, "websiteSourceKey") === "classes:0",
   );
   if (classItem) {
     const classSystem = classItem.system || {};
@@ -674,24 +678,16 @@ function currentLinkForActor(actorUuid) {
 }
 
 async function confirmUnlink(title, message, label = "Unlink") {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-    new Dialog({
-      title,
-      content: `<p>${foundry.utils.escapeHTML(message)}</p>`,
-      buttons: {
-        unlink: { label, callback: () => finish(true) },
-        cancel: { label: "Cancel", callback: () => finish(false) },
-      },
-      default: "cancel",
-      close: () => finish(false),
-    }).render(true);
+  const result = await foundry.applications.api.DialogV2.wait({
+    window: { title },
+    content: `<p>${foundry.utils.escapeHTML(message)}</p>`,
+    buttons: [
+      { action: "unlink", label, default: true },
+      { action: "cancel", label: "Cancel" },
+    ],
+    rejectClose: false,
   });
+  return result === "unlink";
 }
 
 async function unlinkLink(link, { actor = null, revokeRemote = true, notify = true } = {}) {
@@ -797,33 +793,29 @@ function chooseFoundryOwner() {
   const options = players
     .map((user) => `<option value="${escape(user.id)}">${escape(user.name)}</option>`)
     .join("");
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-    new Dialog({
-      title: "Choose the Foundry player",
-      content: `<form><div class="form-group"><label for="dragonmyth-owner">Give this player ownership of the new Actor</label><select id="dragonmyth-owner" name="ownerId">${options}</select></div></form>`,
-      buttons: {
-        create: {
-          label: "Create Actor",
-          callback: (html) => finish(html[0].querySelector('[name="ownerId"]').value),
-        },
-        cancel: { label: "Cancel", callback: () => finish(null) },
+  return foundry.applications.api.DialogV2.wait({
+    window: { title: "Choose the Foundry player" },
+    content: `<form><div class="form-group"><label for="dragonmyth-owner">Give this player ownership of the new Actor</label><select id="dragonmyth-owner" name="ownerId">${options}</select></div></form>`,
+    buttons: [
+      {
+        action: "create",
+        label: "Create Actor",
+        default: true,
+        callback: (_event, _button, dialog) =>
+          dialog.element?.querySelector('[name="ownerId"]')?.value,
       },
-      default: "create",
-      close: () => finish(null),
-    }).render(true);
-  });
+      { action: "cancel", label: "Cancel" },
+    ],
+    rejectClose: false,
+  }).then((ownerId) =>
+    players.some((player) => player.id === ownerId) ? ownerId : null,
+  );
 }
 
 async function synchronizeEmbeddedDocuments(actor, documentName, collection, desired) {
     const existingByKey = new Map();
     for (const document of collection.contents) {
-      const key = document.getFlag(WEBSITE_FLAG_SCOPE, "websiteSourceKey");
+      const key = getSyncFlag(document, "websiteSourceKey");
       if (typeof key !== "string") continue;
       if (existingByKey.has(key)) {
         throw new Error(`The linked Actor has duplicate synced ${documentName} documents.`);
@@ -833,13 +825,14 @@ async function synchronizeEmbeddedDocuments(actor, documentName, collection, des
 
     const desiredByKey = new Map();
     for (const source of desired) {
-      const key = source.flags?.[WEBSITE_FLAG_SCOPE]?.websiteSourceKey;
+      const data = clone(source);
+      data.flags = normalizeSyncFlags(data.flags);
+      const key = data.flags?.[MODULE_ID]?.websiteSourceKey;
       if (typeof key !== "string") {
         throw new Error(`A website-mapped ${documentName} is missing its sync key.`);
       }
-      const data = clone(source);
       const condition = key.startsWith("conditions:")
-        ? data.flags?.[WEBSITE_FLAG_SCOPE]?.websiteSourceType
+        ? data.flags?.[MODULE_ID]?.websiteSourceType
         : null;
       if (documentName === "ActiveEffect" && typeof condition === "string") {
         data._id = conditionDocumentId(condition);
@@ -932,12 +925,10 @@ async function pairFromSettings() {
         ui.notifications.warn("The pairing code was used. Generate a new code on the website to try again.");
         return;
       }
-      const actorFlags = {
-        ...character.foundryActor.flags,
-        [MODULE_ID]: {
-          ...character.foundryActor.flags?.[MODULE_ID],
-          websiteCharacterId: character.id,
-        },
+      const actorFlags = normalizeSyncFlags(character.foundryActor.flags);
+      actorFlags[MODULE_ID] = {
+        ...actorFlags[MODULE_ID],
+        websiteCharacterId: character.id,
       };
       targetActor = await Actor.create({
         name: character.foundryActor.name,
@@ -997,7 +988,7 @@ async function pairFromSettings() {
 }
 
 async function applyWebsiteState(actor, character) {
-  const actorData = character.foundryActor;
+  const actorData = normalizeSyncActorData(character.foundryActor);
   const existingOriginalClass = actor.system.details.originalClass;
   const previouslyManagedClassId = actor.getFlag(MODULE_ID, "websiteManagedClassId");
   const update = { name: actorData.name };
@@ -1006,8 +997,8 @@ async function applyWebsiteState(actor, character) {
     update[`system.${path}`] = value;
   }
   update["system.details.biography.value"] = biographyHtml(character);
-  update[`flags.${WEBSITE_FLAG_SCOPE}.biography`] =
-    clone(actorData.flags?.[WEBSITE_FLAG_SCOPE]?.biography || {});
+  update[`flags.${MODULE_ID}.biography`] =
+    clone(actorData.flags?.[MODULE_ID]?.biography || {});
   update[`flags.${MODULE_ID}.websitePrivateNotes`] = character.biography?.notes || "";
   update[`flags.${MODULE_ID}.websiteSystemData`] = clone(character.systemData);
   update[`flags.${MODULE_ID}.websiteData`] = {
@@ -1020,7 +1011,7 @@ async function applyWebsiteState(actor, character) {
   await synchronizeEmbeddedDocuments(actor, "Item", actor.items, actorData.items || []);
   await synchronizeEmbeddedDocuments(actor, "ActiveEffect", actor.effects, actorData.effects || []);
   const primaryClass = actor.items.contents.find(
-    (item) => item.getFlag(WEBSITE_FLAG_SCOPE, "websiteSourceKey") === "classes:0",
+    (item) => getSyncFlag(item, "websiteSourceKey") === "classes:0",
   );
   if (primaryClass) {
     await actor.update({
