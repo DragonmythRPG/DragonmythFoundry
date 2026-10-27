@@ -84,6 +84,9 @@ const syncPausedLinks = new Set();
 let pairingBusy = false;
 const activeLinks = new Map();
 let accountPrivateKey = null;
+let accountLinkToken = null;
+let accountLinkState = null;
+let accountLinkBusy = false;
 let lastNotificationAt = 0;
 
 function tokenKey(characterId) {
@@ -178,6 +181,28 @@ async function request(path, { method = "GET", token, body, baseUrl = siteUrl() 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || `Website sync failed with HTTP ${response.status}.`);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+async function requestFoundryAccount(path, { method = "GET", token, body, baseUrl = siteUrl() } = {}) {
+  const response = await fetch(`${baseUrl}/api/foundry-account${path}`, {
+    method,
+    cache: "no-store",
+    redirect: "error",
+    headers: {
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(10_000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.error || `Foundry campaign-link request failed with HTTP ${response.status}.`);
     error.status = response.status;
     throw error;
   }
@@ -1251,6 +1276,7 @@ async function unlockAccountEncryptionKey() {
       connectorUserId: game.user.id,
     });
     ui.notifications.info("World account encryption is unlocked for this browser session.");
+    await restoreFoundryCampaignLink();
   } finally {
     passphrase = "";
   }
@@ -1268,12 +1294,15 @@ async function resetAccountEncryptionKey() {
   }
   const confirmed = await confirmUnlink(
     "Reset world account encryption",
-    "Resetting this key makes passwords queued with its public key unrecoverable. Members will need to set their Foundry passwords again.",
+    "Resetting this key makes passwords queued with its public key unrecoverable. If a campaign is linked, unlink it from the Website too before pairing again.",
     "Reset key",
   );
   if (!confirmed) return;
   await game.settings.set(MODULE_ID, "accountKeyEnvelope", {});
+  await game.settings.set(MODULE_ID, "campaignLink", {});
   accountPrivateKey = null;
+  accountLinkToken = null;
+  accountLinkState = null;
   ui.notifications.info("The world account encryption key was cleared.");
 }
 
@@ -1291,10 +1320,153 @@ function unlockedAccountKeyEnvelope() {
   return envelope;
 }
 
+function sameAccountPublicKey(left, right) {
+  return ["kty", "alg", "n", "e"].every((field) => left?.[field] === right?.[field]);
+}
+
 async function encryptAndDecryptAccountPassword(password) {
   const envelope = unlockedAccountKeyEnvelope();
   const ciphertext = await encryptAccountPassword(envelope.publicKey, password);
   return decryptAccountPassword(accountPrivateKey, ciphertext);
+}
+
+async function foundryInstallationId() {
+  let installationId = game.settings.get(MODULE_ID, "foundryInstallationId").trim();
+  if (!installationId) {
+    installationId = foundry.utils.randomID();
+    await game.settings.set(MODULE_ID, "foundryInstallationId", installationId);
+  }
+  return installationId;
+}
+
+async function restoreFoundryCampaignLink() {
+  const savedLink = game.settings.get(MODULE_ID, "campaignLink");
+  if (!savedLink?.tokenEnvelope) return null;
+  if (savedLink.connectorUserId !== game.user.id || savedLink.foundryWorldId !== game.world.id) {
+    throw new Error("The saved campaign link belongs to a different Foundry connector or world.");
+  }
+  const token = await decryptAccountPassword(accountPrivateKey, savedLink.tokenEnvelope);
+  const query = new URLSearchParams({
+    installationId: savedLink.installationId,
+    foundryWorldId: savedLink.foundryWorldId,
+  });
+  try {
+    const result = await requestFoundryAccount(`/state?${query}`, { token });
+    if (result.link?.campaignId !== savedLink.campaignId) {
+      throw new Error("The Website returned a different campaign for this Foundry link.");
+    }
+    if (!sameAccountPublicKey(result.link.publicKey, unlockedAccountKeyEnvelope().publicKey)) {
+      throw new Error("The linked Website campaign has a different account-encryption key.");
+    }
+    accountLinkToken = token;
+    accountLinkState = result.link;
+    ui.notifications.info(`Foundry world is linked to campaign "${result.link.campaignName}".`);
+    return result.link;
+  } catch (error) {
+    if (error.status !== 401) throw error;
+    await game.settings.set(MODULE_ID, "campaignLink", {});
+    accountLinkToken = null;
+    accountLinkState = null;
+    ui.notifications.warn("The Website campaign link is no longer active. Pair the campaign again from its settings.");
+    return null;
+  }
+}
+
+async function pairFoundryCampaign() {
+  if (!game.user.isGM) throw new Error("Only the designated Foundry GM can link a campaign.");
+  if (accountLinkBusy) throw new Error("A Foundry campaign-link request is already in progress.");
+  const existing = game.settings.get(MODULE_ID, "campaignLink");
+  if (existing?.tokenEnvelope) {
+    throw new Error("This Foundry world already has a linked campaign. Unlink it before pairing another.");
+  }
+  const keyEnvelope = unlockedAccountKeyEnvelope();
+  const campaignIdText = game.settings.get(MODULE_ID, "websiteCampaignId").trim();
+  const pairingCode = game.settings.get(MODULE_ID, "campaignPairingCode").trim();
+  if (!/^\d{1,9}$/.test(campaignIdText)) {
+    throw new Error("Enter the numeric Campaign ID from the Website.");
+  }
+  if (!/^[A-Za-z0-9_-]{32}$/.test(pairingCode)) {
+    throw new Error("Enter a current Foundry link code from the Website campaign settings.");
+  }
+
+  accountLinkBusy = true;
+  try {
+    const installationId = await foundryInstallationId();
+    const result = await requestFoundryAccount("/pair", {
+      method: "POST",
+      body: {
+        pairingCode,
+        campaignId: Number(campaignIdText),
+        installationId,
+        foundryWorldId: game.world.id,
+        foundryWorldName: game.world.title || game.world.id,
+        foundrySystemId: game.system.id,
+        foundrySystemVersion: game.system.version,
+        foundryCoreVersion: game.version,
+        connectorUserId: game.user.id,
+        publicKey: keyEnvelope.publicKey,
+      },
+    });
+    if (
+      typeof result.token !== "string" ||
+      !result.link ||
+      result.link.campaignId !== Number(campaignIdText)
+    ) {
+      throw new Error("The Website returned an invalid campaign link.");
+    }
+
+    const tokenEnvelope = await encryptAccountPassword(keyEnvelope.publicKey, result.token);
+    const savedLink = {
+      campaignId: result.link.campaignId,
+      campaignName: result.link.campaignName,
+      websiteWorldId: result.link.websiteWorldId,
+      installationId,
+      foundryWorldId: game.world.id,
+      foundryWorldName: game.world.title || game.world.id,
+      connectorUserId: game.user.id,
+      tokenEnvelope,
+      linkedAt: Date.now(),
+    };
+    await game.settings.set(MODULE_ID, "campaignLink", savedLink);
+    accountLinkToken = result.token;
+    await restoreFoundryCampaignLink();
+    await game.settings.set(MODULE_ID, "campaignPairingCode", "");
+    ui.notifications.info(
+      `Campaign "${savedLink.campaignName}" is linked to Foundry world "${savedLink.foundryWorldName}".`,
+    );
+  } finally {
+    accountLinkBusy = false;
+    await game.settings.set(MODULE_ID, "campaignPairingCode", "");
+  }
+}
+
+async function unlinkFoundryCampaign() {
+  if (!game.user.isGM) throw new Error("Only the designated Foundry GM can unlink a campaign.");
+  unlockedAccountKeyEnvelope();
+  const savedLink = game.settings.get(MODULE_ID, "campaignLink");
+  if (!savedLink?.tokenEnvelope) {
+    ui.notifications.info("This Foundry world has no linked campaign.");
+    return;
+  }
+  const confirmed = await confirmUnlink(
+    "Unlink Foundry campaign",
+    `Stop connecting campaign "${savedLink.campaignName}" to this Foundry world? Existing Foundry users and Actors will remain.`,
+    "Unlink campaign",
+  );
+  if (!confirmed) return;
+  const token = accountLinkToken || await decryptAccountPassword(accountPrivateKey, savedLink.tokenEnvelope);
+  await requestFoundryAccount("/link", {
+    method: "DELETE",
+    token,
+    body: {
+      installationId: savedLink.installationId,
+      foundryWorldId: savedLink.foundryWorldId,
+    },
+  });
+  await game.settings.set(MODULE_ID, "campaignLink", {});
+  accountLinkToken = null;
+  accountLinkState = null;
+  ui.notifications.info("The Foundry campaign link was removed. Foundry users and Actors were kept.");
 }
 
 function foundryUserRoles() {
@@ -1507,6 +1679,54 @@ Hooks.once("init", () => {
     config: false,
     type: Object,
     default: {},
+  });
+  game.settings.register(MODULE_ID, "foundryInstallationId", {
+    scope: "world",
+    config: false,
+    type: String,
+    default: "",
+  });
+  game.settings.register(MODULE_ID, "campaignLink", {
+    scope: "world",
+    config: false,
+    type: Object,
+    default: {},
+  });
+  game.settings.register(MODULE_ID, "websiteCampaignId", {
+    name: "Dragonmyth campaign ID",
+    hint: "Copy the campaign ID from the Website campaign settings.",
+    scope: "client",
+    config: true,
+    type: String,
+    default: "",
+  });
+  game.settings.register(MODULE_ID, "campaignPairingCode", {
+    name: "One-time Foundry link code",
+    hint: "Paste the short-lived code generated in the Website campaign settings.",
+    scope: "client",
+    config: true,
+    type: String,
+    default: "",
+  });
+  game.settings.register(MODULE_ID, "linkFoundryCampaign", {
+    name: "Link Foundry world to campaign (Prototype)",
+    hint: "GM only. Pair the campaign ID above with this Foundry world using its one-time Website code.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) =>
+      void handleUserManagementSetting("linkFoundryCampaign", value, pairFoundryCampaign),
+  });
+  game.settings.register(MODULE_ID, "unlinkFoundryCampaign", {
+    name: "Unlink Foundry campaign (Prototype)",
+    hint: "GM only. Revoke this Foundry world's campaign link. Existing Foundry users and Actors remain.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) =>
+      void handleUserManagementSetting("unlinkFoundryCampaign", value, unlinkFoundryCampaign),
   });
   game.settings.register(MODULE_ID, "setupAccountEncryption", {
     name: "Set up password encryption (Prototype)",

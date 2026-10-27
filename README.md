@@ -22,6 +22,20 @@ The module requires Foundry VTT 14 and D&D 5e system 6.0.6. Use an HTTPS
 website URL (HTTP is accepted only for localhost testing) and try it in a
 disposable world before using it with live characters.
 
+## Link a campaign to a Foundry world
+
+1. As a campaign GM on the Website, open the campaign settings, copy its
+   **Campaign ID**, and generate a one-time Foundry link code.
+2. In Foundry Module Settings, enter the Website URL, Campaign ID, and link
+   code, then choose **Link Foundry world to campaign**.
+3. The link code expires after ten minutes and can be used once. The ID is only
+   a locator; it does not authorize the link by itself.
+
+The current prototype links one campaign to one Foundry world, and a Foundry
+world can be linked to only one campaign. It supports D&D 5e (2024), records
+the association and public encryption key, but does not yet provision the
+campaign roster or synchronize profile passwords.
+
 ## Pair a character
 
 1. On the website, sign in and open an editable D&D 5e (2024) character.
@@ -54,14 +68,14 @@ its stale link instead of retrying the deleted reference.
 
 The module settings include GM-only controls to create a user in the current
 world or change another user's password. These controls are a manual API
-prototype; they are not yet linked to a website campaign or its member roster.
+prototype; they are not yet driven by the linked campaign's member roster.
 The password is entered in Foundry and is not saved by the module or sent to
 the Website. Set up password encryption first; the private key is stored
 encrypted in the world settings and the designated connector GM must unlock it
 with a separate passphrase in each browser session. Use a unique, high-entropy
 passphrase and do not reuse the Foundry GM login password. The module does not
-store the passphrase. Test with disposable accounts in a test world. Website
-campaign linking and password delivery are not implemented yet.
+store the passphrase. Test with disposable accounts in a test world. Campaign
+roster provisioning and Website password delivery are not implemented yet.
 
 ## Publishing a release
 

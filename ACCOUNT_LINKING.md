@@ -61,6 +61,21 @@ use stable Foundry IDs rather than display names and be scoped to a specific
 world; if multiple Foundry installations are supported, the world scope needs
 an installation-specific identifier rather than only a world slug.
 
+## Campaign-to-world pairing
+
+The current prototype's campaign ID is a public locator, not a credential. A
+campaign GM requests a short-lived, one-time pairing code from the authenticated
+campaign settings page. The Foundry connector exchanges that code together
+with its installation ID, world ID, system version, and public encryption
+key. The Website stores a one-campaign-to-one-Foundry-world association; a
+pairing code is required even when the campaign ID is known.
+
+This proves that the code issuer authorized a campaign link, but it does not
+make client-reported Foundry details cryptographically trustworthy. The
+pairing token is therefore narrowly scoped to that campaign and world. It
+must not grant Website permissions, and roster roles must continue to be
+calculated by the Website rather than accepted from Foundry client requests.
+
 ## Before using a link for permissions
 
 Do not use a client-reported Foundry ID to grant character access, campaign
