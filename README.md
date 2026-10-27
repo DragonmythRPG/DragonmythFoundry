@@ -56,7 +56,12 @@ The module settings include GM-only controls to create a user in the current
 world or change another user's password. These controls are a manual API
 prototype; they are not yet linked to a website campaign or its member roster.
 The password is entered in Foundry and is not saved by the module or sent to
-the Website. Test with disposable accounts in a test world.
+the Website. Set up password encryption first; the private key is stored
+encrypted in the world settings and the designated connector GM must unlock it
+with a separate passphrase in each browser session. Use a unique, high-entropy
+passphrase and do not reuse the Foundry GM login password. The module does not
+store the passphrase. Test with disposable accounts in a test world. Website
+campaign linking and password delivery are not implemented yet.
 
 ## Publishing a release
 

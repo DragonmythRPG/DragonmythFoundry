@@ -15,6 +15,29 @@ authorization checks. The module must never ask for or store a Discord
 password, OAuth token, website session cookie, bot API key, or Foundry admin
 credential.
 
+## Member Foundry passwords (proposed)
+
+The connector account's password is separate from member Foundry passwords and
+must never be sent to the Website. If members set their Foundry passwords in
+their Website profiles, the browser should encrypt each password with the
+linked world's public key before sending it to the Website. The Website would
+store only ciphertext for the module to replay when the world is open.
+
+The Foundry module would keep the private key encrypted in world data under a
+separate connector passphrase. Only the designated connector user should unlock
+it, and that passphrase must be entered in each browser session rather than
+stored in the Website or Foundry settings. This allows different browsers to
+connect to the same world while keeping the Website server from decrypting the
+queued passwords. The password is still present in the member's browser when
+entered and in the connector GM's client while it is applied; this does not
+protect against compromised browser code or a malicious GM. Losing the
+connector passphrase makes queued ciphertext unrecoverable, so members would
+need to reset their passwords.
+
+This is a proposed design. The current module prototype only tests world-key
+creation, connector unlock, and local password encryption/decryption; it does
+not yet link campaigns or send password updates through the Website.
+
 ## Low-risk linking flow
 
 For profile display or other non-authorizing conveniences, a first version

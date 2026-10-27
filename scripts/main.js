@@ -5,6 +5,12 @@ import {
   normalizeSyncActorData,
   normalizeSyncFlags,
 } from "./sync-flags.mjs";
+import {
+  createAccountKeyEnvelope,
+  decryptAccountPassword,
+  encryptAccountPassword,
+  unlockAccountKeyEnvelope,
+} from "./account-crypto.mjs";
 
 const SYNC_INTERVAL_MS = 15_000;
 const TOKEN_KEY_PREFIX = `${MODULE_ID}:token:`;
@@ -77,6 +83,7 @@ const syncBusyLinks = new Set();
 const syncPausedLinks = new Set();
 let pairingBusy = false;
 const activeLinks = new Map();
+let accountPrivateKey = null;
 let lastNotificationAt = 0;
 
 function tokenKey(characterId) {
@@ -1164,6 +1171,132 @@ async function handleUnlinkAllSetting(value) {
   }
 }
 
+async function promptForConnectorPassphrase(title, confirm = false) {
+  const confirmationField = confirm
+    ? `<div class="form-group"><label for="dragonmyth-connector-confirm">Confirm connector passphrase</label><input id="dragonmyth-connector-confirm" name="confirmation" type="password" autocomplete="new-password" required></div>`
+    : "";
+  const result = await foundry.applications.api.DialogV2.wait({
+    window: { title },
+    content: `<form>
+      <div class="form-group"><label for="dragonmyth-connector-passphrase">Connector passphrase</label><input id="dragonmyth-connector-passphrase" name="passphrase" type="password" autocomplete="new-password" required></div>
+      ${confirmationField}
+    </form>`,
+    buttons: [
+      {
+        action: "unlock",
+        label: confirm ? "Set up key" : "Unlock",
+        default: true,
+        callback: (_event, _button, dialog) =>
+          readPasswordDialog(dialog, confirm ? ["passphrase", "confirmation"] : ["passphrase"]),
+      },
+      { action: "cancel", label: "Cancel" },
+    ],
+    rejectClose: false,
+  });
+  if (!result || result === "cancel") return null;
+  let passphrase = String(result.passphrase || "");
+  const confirmation = String(result.confirmation || "");
+  result.passphrase = "";
+  result.confirmation = "";
+  if (passphrase.length < 16) {
+    passphrase = "";
+    throw new Error("Use a connector passphrase of at least 16 characters.");
+  }
+  if (confirm && passphrase !== confirmation) {
+    passphrase = "";
+    throw new Error("The connector passphrase confirmation does not match.");
+  }
+  return passphrase;
+}
+
+async function setupAccountEncryptionKey() {
+  if (!game.user.isGM) throw new Error("Only a Foundry GM can set up account encryption.");
+  const existing = game.settings.get(MODULE_ID, "accountKeyEnvelope");
+  if (existing?.version) {
+    throw new Error("This world already has an account encryption key. Reset it before creating another.");
+  }
+  let passphrase = await promptForConnectorPassphrase("Set up account encryption", true);
+  if (!passphrase) return;
+  try {
+    const envelope = await createAccountKeyEnvelope({
+      passphrase,
+      worldId: game.world.id,
+      connectorUserId: game.user.id,
+    });
+    await game.settings.set(MODULE_ID, "accountKeyEnvelope", envelope);
+    accountPrivateKey = await unlockAccountKeyEnvelope(envelope, passphrase, {
+      worldId: game.world.id,
+      connectorUserId: game.user.id,
+    });
+    ui.notifications.info(
+      "The world account key is ready. Save the separate connector passphrase; it is not stored by Foundry or the Website.",
+    );
+  } finally {
+    passphrase = "";
+  }
+}
+
+async function unlockAccountEncryptionKey() {
+  if (!game.user.isGM) throw new Error("Only a Foundry GM can unlock account encryption.");
+  const envelope = game.settings.get(MODULE_ID, "accountKeyEnvelope");
+  if (!envelope?.version) throw new Error("Set up account encryption for this world first.");
+  if (envelope.connectorUserId !== game.user.id) {
+    throw new Error("Sign in as the designated world connector account to unlock this key.");
+  }
+  let passphrase = await promptForConnectorPassphrase("Unlock account encryption");
+  if (!passphrase) return;
+  try {
+    accountPrivateKey = await unlockAccountKeyEnvelope(envelope, passphrase, {
+      worldId: game.world.id,
+      connectorUserId: game.user.id,
+    });
+    ui.notifications.info("World account encryption is unlocked for this browser session.");
+  } finally {
+    passphrase = "";
+  }
+}
+
+async function resetAccountEncryptionKey() {
+  if (!game.user.isGM) throw new Error("Only a Foundry GM can reset account encryption.");
+  const envelope = game.settings.get(MODULE_ID, "accountKeyEnvelope");
+  if (!envelope?.version) {
+    ui.notifications.info("This world does not have an account encryption key.");
+    return;
+  }
+  if (envelope.connectorUserId !== game.user.id) {
+    throw new Error("Sign in as the designated world connector account to reset this key.");
+  }
+  const confirmed = await confirmUnlink(
+    "Reset world account encryption",
+    "Resetting this key makes passwords queued with its public key unrecoverable. Members will need to set their Foundry passwords again.",
+    "Reset key",
+  );
+  if (!confirmed) return;
+  await game.settings.set(MODULE_ID, "accountKeyEnvelope", {});
+  accountPrivateKey = null;
+  ui.notifications.info("The world account encryption key was cleared.");
+}
+
+function unlockedAccountKeyEnvelope() {
+  const envelope = game.settings.get(MODULE_ID, "accountKeyEnvelope");
+  if (
+    !accountPrivateKey ||
+    !envelope?.version ||
+    !envelope.publicKey ||
+    envelope.worldId !== game.world.id ||
+    envelope.connectorUserId !== game.user.id
+  ) {
+    throw new Error("Unlock account encryption as the designated world connector before managing passwords.");
+  }
+  return envelope;
+}
+
+async function encryptAndDecryptAccountPassword(password) {
+  const envelope = unlockedAccountKeyEnvelope();
+  const ciphertext = await encryptAccountPassword(envelope.publicKey, password);
+  return decryptAccountPassword(accountPrivateKey, ciphertext);
+}
+
 function foundryUserRoles() {
   return [
     { label: "Player", value: CONST.USER_ROLES.PLAYER },
@@ -1185,6 +1318,7 @@ function readPasswordDialog(dialog, fields) {
 
 async function createFoundryUser() {
   if (!game.user.isGM) throw new Error("Only a Foundry GM can create users.");
+  unlockedAccountKeyEnvelope();
   const roles = foundryUserRoles();
   const options = roles
     .map(({ label, value }) =>
@@ -1225,21 +1359,25 @@ async function createFoundryUser() {
   }
 
   let password = form.password;
+  let foundryPassword = "";
   form.password = "";
   form.confirmation = "";
   try {
-    const user = await User.create({ name, role, password });
+    foundryPassword = await encryptAndDecryptAccountPassword(password);
+    const user = await User.create({ name, role, password: foundryPassword });
     if (!user) throw new Error("Foundry did not return the created user.");
     ui.notifications.info(
       `Created Foundry user "${user.name}" with the ${roles.find((option) => option.value === role).label} role. Verify the password at the Foundry login screen.`,
     );
   } finally {
     password = "";
+    foundryPassword = "";
   }
 }
 
 async function changeFoundryUserPassword() {
   if (!game.user.isGM) throw new Error("Only a Foundry GM can change user passwords.");
+  unlockedAccountKeyEnvelope();
   const users = game.users.contents.filter((user) => user.id !== game.user.id);
   if (!users.length) {
     ui.notifications.info("Create another Foundry user before changing its password.");
@@ -1284,13 +1422,16 @@ async function changeFoundryUserPassword() {
   }
 
   let password = form.password;
+  let foundryPassword = "";
   form.password = "";
   form.confirmation = "";
   try {
-    await user.update({ password });
+    foundryPassword = await encryptAndDecryptAccountPassword(password);
+    await user.update({ password: foundryPassword });
     ui.notifications.info(`Submitted a password update for "${user.name}". Verify it at the Foundry login screen.`);
   } finally {
     password = "";
+    foundryPassword = "";
   }
 }
 
@@ -1343,7 +1484,7 @@ Hooks.once("init", () => {
   });
   game.settings.register(MODULE_ID, "createUser", {
     name: "Create Foundry user (Prototype)",
-    hint: "GM only. Creates a user in this world with the selected role and password. Passwords are not stored by the module or sent to the Website.",
+    hint: "GM only. Unlock account encryption first, then create a user with a role and password. Passwords are not stored by the module or sent to the Website.",
     scope: "client",
     config: true,
     type: Boolean,
@@ -1353,7 +1494,7 @@ Hooks.once("init", () => {
   });
   game.settings.register(MODULE_ID, "changeUserPassword", {
     name: "Set Foundry user password (Prototype)",
-    hint: "GM only. Changes another user's password in this world. Passwords are not stored by the module or sent to the Website.",
+    hint: "GM only. Unlock account encryption first, then change another user's password. Passwords are not stored by the module or sent to the Website.",
     scope: "client",
     config: true,
     type: Boolean,
@@ -1361,11 +1502,51 @@ Hooks.once("init", () => {
     onChange: (value) =>
       void handleUserManagementSetting("changeUserPassword", value, changeFoundryUserPassword),
   });
+  game.settings.register(MODULE_ID, "accountKeyEnvelope", {
+    scope: "world",
+    config: false,
+    type: Object,
+    default: {},
+  });
+  game.settings.register(MODULE_ID, "setupAccountEncryption", {
+    name: "Set up password encryption (Prototype)",
+    hint: "GM only. Creates a world key protected by a unique connector passphrase of at least 16 characters. Do not reuse the Foundry login password.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) =>
+      void handleUserManagementSetting("setupAccountEncryption", value, setupAccountEncryptionKey),
+  });
+  game.settings.register(MODULE_ID, "unlockAccountEncryption", {
+    name: "Unlock password encryption (Prototype)",
+    hint: "GM only. Unlock the world key in this browser session using the connector passphrase.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) =>
+      void handleUserManagementSetting("unlockAccountEncryption", value, unlockAccountEncryptionKey),
+  });
+  game.settings.register(MODULE_ID, "resetAccountEncryption", {
+    name: "Reset password encryption key (Prototype)",
+    hint: "GM only. Permanently invalidates all passwords encrypted with the current world key.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (value) =>
+      void handleUserManagementSetting("resetAccountEncryption", value, resetAccountEncryptionKey),
+  });
 });
 
 Hooks.once("ready", () => {
   ready = true;
   if (!game.user.isGM) return;
+  const accountKey = game.settings.get(MODULE_ID, "accountKeyEnvelope");
+  if (accountKey?.version && accountKey.connectorUserId === game.user.id) {
+    void unlockAccountEncryptionKey().catch(notifyError);
+  }
   try {
     const website = siteUrl();
     for (const link of readLinks().values()) {
