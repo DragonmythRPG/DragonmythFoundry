@@ -2,6 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveSyncChanges } from "../scripts/sync-state.mjs";
 
+test("resource gameplay state participates in bidirectional synchronization", () => {
+  const baseline = { resourcePools: [{ id: "charges", scope: "owner", ownerInstanceId: "wand", current: 4 }] };
+  const actor = { resourcePools: [{ ...baseline.resourcePools[0], current: 2 }] };
+  const result = resolveSyncChanges(baseline, baseline, baseline, actor);
+  assert.deepEqual(result.acceptedLocalChanges, ["resourcePools"]);
+  assert.deepEqual(result.changes.resourcePools, actor.resourcePools);
+  const remote = { resourcePools: [{ ...baseline.resourcePools[0], current: 3 }] };
+  const conflict = resolveSyncChanges(baseline, remote, baseline, actor);
+  assert.deepEqual(conflict.conflicts, ["resourcePools"]);
+  assert.deepEqual(conflict.changes, {});
+});
+
 test("same-field conflicts keep the website value while accepting disjoint Foundry edits", () => {
   const baseline = {
     name: "Mira",

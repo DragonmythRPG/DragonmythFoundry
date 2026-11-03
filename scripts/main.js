@@ -1,4 +1,5 @@
 import { resolveSyncChanges } from "./sync-state.mjs";
+import { spendActionResources, recoverResourcePools, removeConsumedEquipmentPools } from "./resource-pools.mjs";
 import {
   getSyncFlag,
   MODULE_ID,
@@ -14,7 +15,7 @@ import {
 
 const SYNC_INTERVAL_MS = 15_000;
 const TOKEN_KEY_PREFIX = `${MODULE_ID}:token:`;
-const SYNC_SCHEMA_VERSION = 2;
+const SYNC_SCHEMA_VERSION = 3;
 const PRIVATE_NOTES_HEADING = "Dragonmyth Private Notes";
 const DND5E_CONDITIONS = [
   "blinded",
@@ -228,6 +229,7 @@ function websiteState(character) {
     abilities: clone(character.abilities),
     biography: clone(character.biography),
     systemData: clone(character.systemData),
+    resourcePools: clone(character.resourcePools),
   };
 }
 
@@ -326,6 +328,8 @@ function readManagedEntries(documents, group, baseline, convert) {
     const document = byIndex.get(index);
     if (document) {
       const entry = convert(document, baseline[index] || {});
+      if (group === "items" && entry?.quantity === 0 &&
+          ["ammunition", "consumable", "potion"].includes(entry.itemData?.type || entry.type)) continue;
       if (entry !== null && entry !== undefined) entries.push(entry);
     }
   }
@@ -349,6 +353,7 @@ function itemToWebsite(document, baseline) {
       : baseline.description,
   };
   if (websiteItemData) result.itemData = clone(websiteItemData);
+  if (baseline.compendiumEntryId && result.itemData?.mechanics) return result;
   const weaponAction = result.itemData?.weapon?.actions?.[0];
   if (weaponAction) {
     const rangeUnits = system.range?.units;
@@ -550,6 +555,8 @@ function snapshot(actor, baseline) {
   const deathSaves = attributes.death || {};
   const syncedSystemData = actor.getFlag(MODULE_ID, "websiteSystemData");
   if (syncedSystemData) state.systemData = clone(syncedSystemData);
+  const resourcePools = actor.getFlag(MODULE_ID, "websiteResourcePools");
+  if (resourcePools) state.resourcePools = clone(resourcePools);
   state.name = actor.name;
   state.race = typeof details.race === "string" ? details.race : details.race?.name ?? state.race;
   state.background = typeof details.background === "string"
@@ -660,7 +667,9 @@ function snapshot(actor, baseline) {
     (Number(currency.ep) || 0) * 50 +
     (Number(currency.sp) || 0) * 10 +
     (Number(currency.cp) || 0);
+  const previousItems = systemData.items;
   systemData.items = readManagedEntries(actor.items.contents, "items", systemData.items, itemToWebsite);
+  state.resourcePools = removeConsumedEquipmentPools(state.resourcePools || [], previousItems, systemData.items);
   systemData.features = readManagedEntries(actor.items.contents, "features", systemData.features, featureToWebsite);
   systemData.feats = readManagedEntries(actor.items.contents, "feats", systemData.feats, featureToWebsite);
   systemData.spells = readManagedEntries(actor.items.contents, "spells", systemData.spells, spellToWebsite);
@@ -1033,6 +1042,7 @@ async function applyWebsiteState(actor, character) {
     clone(actorData.flags?.[MODULE_ID]?.biography || {});
   update[`flags.${MODULE_ID}.websitePrivateNotes`] = character.biography?.notes || "";
   update[`flags.${MODULE_ID}.websiteSystemData`] = clone(character.systemData);
+  update[`flags.${MODULE_ID}.websiteResourcePools`] = clone(character.resourcePools);
   update[`flags.${MODULE_ID}.websiteData`] = {
     subclass: character.subclass || "",
     originalClass: character.systemData.originalClass || "",
@@ -1152,6 +1162,89 @@ function startSync() {
   if (syncTimer) clearInterval(syncTimer);
   reconcileActiveLinks();
   syncTimer = setInterval(reconcileActiveLinks, SYNC_INTERVAL_MS);
+}
+
+async function resourceRoll(formula) {
+  const roll = await new Roll(String(formula)).evaluate();
+  await roll.toMessage({ flavor: "Dragonmyth resource amount" });
+  return roll.total;
+}
+
+async function showActorResources(actor) {
+  if (!actor.isOwner) throw new Error("You must own this Actor to use its resources.");
+  const pools = clone(actor.getFlag(MODULE_ID, "websiteResourcePools"));
+  const data = actor.getFlag(MODULE_ID, "websiteSystemData");
+  if (!Array.isArray(pools) || !data) throw new Error("Wait for the linked character to finish syncing before opening its resources.");
+  if (pools.some((pool) => !Number.isInteger(pool.current) || !Number.isInteger(pool.maximumValue) ||
+      pool.current < 0 || pool.current > pool.maximumValue || pool.maximumValue > 100000)) {
+    throw new Error("The Actor has invalid resource values. Resync it from the website before using its resources.");
+  }
+  const owners = [...(data.compendiumProficiencySources || []),
+    ...["items", "features", "feats", "spells"].flatMap((list) => data[list] || [])];
+  const ownerNames = new Map(owners.map((owner) => [owner.instanceId, owner.name]));
+  const actions = owners.flatMap((owner) =>
+    (owner.itemData?.actions || owner.itemData?.weapon?.actions || owner.actions || [])
+      .map((action) => ({ owner, action })));
+  const escape = (value) => foundry.utils.escapeHTML(String(value));
+  const result = await foundry.applications.api.DialogV2.wait({
+    window: { title: `${actor.name}: Dragonmyth resources` },
+    content: `<form><p>Equipment charges belong to each equipment instance. Maximums come from the compendium.</p>
+      ${pools.map((pool, index) => `<div class="form-group"><label>${escape(pool.ownerInstanceId
+        ? `${ownerNames.get(pool.ownerInstanceId) || pool.ownerInstanceId}: ${pool.name}` : pool.name)}
+        (${pool.maximumValue} maximum)</label><input name="pool-${index}" type="number" min="0" max="${pool.maximumValue}" value="${pool.current}"></div>`).join("")}
+      <div class="form-group"><label>Compendium action</label><select name="action">${actions.map(({ owner, action }, index) =>
+        `<option value="${index}">${escape(`${owner.name}: ${action.name}`)}</option>`).join("")}</select></div>
+      <p>Use action spends its resource costs. Attack, targeting, and native activity resolution remain on your normal sheet.</p>
+    </form>`,
+    buttons: [
+      { action: "save", label: "Save current values", callback: (_event, _button, dialog) => {
+        const form = dialog.element.querySelector("form");
+        return { type: "save", values: pools.map((pool, index) => ({ ...pool, current: Number(form.elements.namedItem(`pool-${index}`).value) })) };
+      } },
+      { action: "use", label: "Use action", disabled: !actions.length, callback: (_event, _button, dialog) => ({
+        type: "use", index: Number(dialog.element.querySelector('select[name="action"]').value),
+      }) },
+      { action: "short", label: "Short-rest resources" },
+      { action: "long", label: "Long-rest resources" },
+      { action: "cancel", label: "Close" },
+    ],
+    rejectClose: false,
+  });
+  if (!result || result === "cancel") return;
+  const current = clone(actor.getFlag(MODULE_ID, "websiteResourcePools"));
+  if (JSON.stringify(current) !== JSON.stringify(pools)) throw new Error("Resources changed while the dialog was open. Reopen it and try again.");
+  let next;
+  if (result.type === "save") {
+    next = result.values;
+    if (next.some((pool) => !Number.isInteger(pool.current) || pool.current < 0 || pool.current > pool.maximumValue)) {
+      throw new Error("Current resource values must be integers between zero and their maximum.");
+    }
+  } else if (result.type === "use") {
+    const selected = actions[result.index];
+    if (!selected) throw new Error("Choose a valid compendium action.");
+    next = await spendActionResources(pools, selected.action, selected.owner.instanceId, resourceRoll);
+  } else if (result === "short" || result === "long") {
+    next = await recoverResourcePools(pools, `${result}-rest`, resourceRoll);
+  } else {
+    throw new Error("Unknown Dragonmyth resource operation.");
+  }
+  if (JSON.stringify(actor.getFlag(MODULE_ID, "websiteResourcePools")) !== JSON.stringify(pools)) {
+    throw new Error("Resources changed while amounts were being rolled. No resource changes were saved.");
+  }
+  await actor.update({ [`flags.${MODULE_ID}.websiteResourcePools`]: next });
+  ui.notifications.info("Dragonmyth resource values updated. The connector will sync these gameplay changes to the website.");
+}
+
+function addActorResourceControl(app, controls, applicationV2 = false) {
+  const actor = app.document || app.object || app.actor;
+  if (!actor?.isOwner || !actor.getFlag(MODULE_ID, "websiteCharacterId")) return;
+  const onClick = () => void showActorResources(actor).catch(notifyError);
+  const control = { class: "dragonmyth-resources", icon: "fas fa-battery-half", label: "Dragonmyth resources", onClick };
+  if (applicationV2) {
+    if (Array.isArray(controls.dropdown)) controls.dropdown.unshift(control);
+    else if (Array.isArray(controls.inline)) controls.inline.unshift(control);
+    else if (Array.isArray(controls)) controls.unshift(control);
+  } else if (Array.isArray(controls)) controls.unshift({ ...control, onclick: onClick });
 }
 
 function addActorUnlinkControl(app, controls, applicationV2 = false) {
@@ -1787,10 +1880,12 @@ Hooks.once("ready", () => {
 });
 
 Hooks.on("getActorSheetHeaderButtons", (app, buttons) => {
+  addActorResourceControl(app, buttons);
   addActorUnlinkControl(app, buttons);
 });
 
 Hooks.on("getHeaderControlsActorSheetV2", (app, controls) => {
+  addActorResourceControl(app, controls, true);
   addActorUnlinkControl(app, controls, true);
 });
 

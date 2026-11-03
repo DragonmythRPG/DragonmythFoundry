@@ -64,6 +64,23 @@ Foundry's separate public biography field.
 If an Actor is deleted, the module detects the missing document and revokes
 its stale link instead of retrying the deleted reference.
 
+## Compendium resources
+
+The Actor sheet's **Dragonmyth resources** header control exposes the linked
+character's resource pools, including distinct equipment-instance charges.
+Current values can be changed during gameplay; maximums and pool definitions
+remain Website-managed. **Use action** rolls and spends that entry's number-or-
+dice resource costs. Rest-resource buttons apply structured recovery rules.
+Changes sync through the connected GM client, even when Website sheet authoring
+is locked.
+
+Pools, stable owner IDs, and action definitions are retained in module flags.
+This prototype does not wire those custom costs into native D&D 5e activities;
+use the Dragonmyth control for costs, and the normal sheet for attacks,
+ammunition, targeting, and damage resolution. It does not automate arbitrary
+description text or unknown component fields. Test in a disposable Foundry
+world before using this testing-branch build with live characters.
+
 ## World user management prototype
 
 The module settings include GM-only controls to create a user in the current
