@@ -1,6 +1,7 @@
 import { resolveSyncChanges } from "./sync-state.mjs";
 import { spendActionResources, recoverResourcePools, removeConsumedEquipmentPools } from "./resource-pools.mjs";
 import {
+  managedEntryDocuments,
   getSyncFlag,
   MODULE_ID,
   normalizeSyncActorData,
@@ -291,12 +292,6 @@ function splitBiography(html, fallbackNotes) {
   return { backstory: htmlToText(parsed.body.innerHTML), notes };
 }
 
-function sourceIndex(document, group) {
-  const key = getSyncFlag(document, "websiteSourceKey");
-  const match = typeof key === "string" && new RegExp(`^${group}:(\\d+)$`).exec(key);
-  return match ? Number(match[1]) : null;
-}
-
 function conditionDocumentId(condition) {
   const id = `dnd5e${condition}`;
   return id.length >= 16 ? id.slice(0, 16) : id.padEnd(16, "0");
@@ -313,25 +308,12 @@ function readWebsiteConditions(actor) {
 }
 
 function readManagedEntries(documents, group, baseline, convert) {
-  const byIndex = new Map();
-  for (const document of documents) {
-    const index = sourceIndex(document, group);
-    if (index === null) continue;
-    if (byIndex.has(index)) {
-      throw new Error(`The linked Actor contains duplicate Dragonmyth ${group} entries.`);
-    }
-    byIndex.set(index, document);
-  }
   const entries = [];
-  const maximum = Math.max(baseline.length, ...[...byIndex.keys()].map((index) => index + 1));
-  for (let index = 0; index < maximum; index += 1) {
-    const document = byIndex.get(index);
-    if (document) {
-      const entry = convert(document, baseline[index] || {});
-      if (group === "items" && entry?.quantity === 0 &&
-          ["ammunition", "consumable", "potion"].includes(entry.itemData?.type || entry.type)) continue;
-      if (entry !== null && entry !== undefined) entries.push(entry);
-    }
+  for (const { document, baseline: baselineEntry } of managedEntryDocuments(documents, group, baseline)) {
+    const entry = convert(document, baselineEntry);
+    if (group === "items" && entry?.quantity === 0 &&
+        ["ammunition", "consumable", "potion"].includes(entry.itemData?.type || entry.type)) continue;
+    if (entry !== null && entry !== undefined) entries.push(entry);
   }
   return entries;
 }

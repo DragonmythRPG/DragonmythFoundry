@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  classFeatureSyncKey,
   getSyncFlag,
+  managedEntryDocuments,
   MODULE_ID,
   normalizeSyncActorData,
 } from "../scripts/sync-flags.mjs";
@@ -48,4 +50,28 @@ test("legacy website flags can be read without using their invalid Foundry scope
 
   assert.equal(getSyncFlag(document, "websiteSourceKey"), "classes:0");
   assert.deepEqual(requestedScopes, [MODULE_ID]);
+});
+
+test("class features match Foundry items by stable identity when their order changes", () => {
+  const earlier = { classEntryId: "22", classFeatureKey: "feature-a@3", name: "Subclass" };
+  const later = { classEntryId: "22", classFeatureKey: "feature-b@4", name: "Ability Score Improvement" };
+  const baseline = [{ name: "Manual feature" }, later, earlier];
+  const documents = [
+    { sourceKey: "features:0", name: "Manual feature" },
+    { sourceKey: classFeatureSyncKey(earlier), name: "Subclass" },
+    { sourceKey: classFeatureSyncKey(later), name: "Ability Score Improvement" },
+  ].map((item) => ({
+    name: item.name,
+    flags: { [MODULE_ID]: { websiteSourceKey: item.sourceKey } },
+    getFlag(scope, key) { return this.flags[scope]?.[key]; },
+  }));
+
+  const matched = managedEntryDocuments(documents, "features", baseline);
+
+  assert.deepEqual(matched.map(({ document }) => document.name), [
+    "Manual feature", "Ability Score Improvement", "Subclass",
+  ]);
+  assert.deepEqual(matched.map(({ baseline: entry }) => entry.name), [
+    "Manual feature", "Ability Score Improvement", "Subclass",
+  ]);
 });

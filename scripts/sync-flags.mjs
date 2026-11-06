@@ -5,6 +5,41 @@ export function getSyncFlag(document, key) {
   return document.getFlag(MODULE_ID, key) ?? document.flags?.[WEBSITE_FLAG_SCOPE]?.[key];
 }
 
+export function classFeatureSyncKey(feature) {
+  if (!feature?.classEntryId || !feature?.classFeatureKey) return null;
+  return `class-features:${JSON.stringify([String(feature.classEntryId), String(feature.classFeatureKey)])}`;
+}
+
+export function managedEntryDocuments(documents, group, baseline) {
+  const byIndex = new Map();
+  const byClassFeatureKey = new Map();
+  for (const document of documents) {
+    const key = getSyncFlag(document, "websiteSourceKey");
+    const match = typeof key === "string" && new RegExp(`^${group}:(\\d+)$`).exec(key);
+    if (match) {
+      const index = Number(match[1]);
+      if (byIndex.has(index)) {
+        throw new Error(`The linked Actor contains duplicate Dragonmyth ${group} entries.`);
+      }
+      byIndex.set(index, document);
+    } else if (group === "features" && typeof key === "string" && key.startsWith("class-features:")) {
+      if (byClassFeatureKey.has(key)) {
+        throw new Error("The linked Actor contains duplicate Dragonmyth class feature entries.");
+      }
+      byClassFeatureKey.set(key, document);
+    }
+  }
+  const entries = [];
+  const maximum = Math.max(baseline.length, ...[...byIndex.keys()].map((index) => index + 1));
+  for (let index = 0; index < maximum; index += 1) {
+    const baselineEntry = baseline[index] || {};
+    const stableKey = group === "features" ? classFeatureSyncKey(baselineEntry) : null;
+    const document = stableKey ? byClassFeatureKey.get(stableKey) : byIndex.get(index);
+    if (document) entries.push({ document, baseline: baselineEntry });
+  }
+  return entries;
+}
+
 export function normalizeSyncFlags(flags) {
   if (!flags || typeof flags !== "object" || Array.isArray(flags)) return {};
 
