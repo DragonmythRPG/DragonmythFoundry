@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classFeatureSyncKey,
+  classProgressionSyncKey,
   getSyncFlag,
   managedEntryDocuments,
   MODULE_ID,
@@ -74,4 +75,30 @@ test("class features match Foundry items by stable identity when their order cha
   assert.deepEqual(matched.map(({ baseline: entry }) => entry.name), [
     "Manual feature", "Ability Score Improvement", "Subclass",
   ]);
+});
+
+test("class progression grants retain stable Item and ActiveEffect identities", () => {
+  const baseline = [
+    { name: "Manual item" },
+    { classProgressionKey: "grant-feature-1", progressionCategoryId: "features", name: "Bardic Inspiration" },
+    { classProgressionKey: "grant-effect-1", progressionCategoryId: "conditions", name: "Blessed" },
+  ];
+  const items = [
+    { key: "items:0", name: "Manual item" },
+    { key: classProgressionSyncKey(baseline[1]), name: "Bardic Inspiration" },
+  ].map((item) => ({
+    name: item.name,
+    flags: { [MODULE_ID]: { websiteSourceKey: item.key } },
+    getFlag(scope, key) { return this.flags[scope]?.[key]; },
+  }));
+  const effects = [{
+    name: "Blessed",
+    flags: { [MODULE_ID]: { websiteSourceKey: classProgressionSyncKey(baseline[2]) } },
+    getFlag(scope, key) { return this.flags[scope]?.[key]; },
+  }];
+
+  assert.deepEqual(managedEntryDocuments(items, "items", baseline.slice(0, 2))
+    .map(({ document }) => document.name), ["Manual item", "Bardic Inspiration"]);
+  assert.deepEqual(managedEntryDocuments(effects, "effects", [baseline[2]])
+    .map(({ document }) => document.name), ["Blessed"]);
 });

@@ -1162,7 +1162,7 @@ async function showActorResources(actor) {
     throw new Error("The Actor has invalid resource values. Resync it from the website before using its resources.");
   }
   const owners = [...(data.compendiumProficiencySources || []),
-    ...["items", "features", "feats", "spells"].flatMap((list) => data[list] || [])];
+    ...["items", "features", "feats", "spells", "effects"].flatMap((list) => data[list] || [])];
   const ownerNames = new Map(owners.map((owner) => [owner.instanceId, owner.name]));
   const actions = owners.flatMap((owner) =>
     (owner.itemData?.actions || owner.itemData?.weapon?.actions || owner.actions || [])
