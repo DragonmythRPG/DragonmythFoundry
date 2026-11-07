@@ -15,6 +15,11 @@ export function classProgressionSyncKey(entry) {
   return `class-progression:${JSON.stringify([String(entry.progressionCategoryId), String(entry.classProgressionKey)])}`;
 }
 
+export function classLevelSyncKey(entry) {
+  if (!entry?.entryGlobalId) return null;
+  return `class-level:${String(entry.entryGlobalId)}`;
+}
+
 export function managedEntryDocuments(documents, group, baseline) {
   const byIndex = new Map();
   const byStableKey = new Map();
@@ -28,7 +33,9 @@ export function managedEntryDocuments(documents, group, baseline) {
       }
       byIndex.set(index, document);
     } else if (typeof key === "string" &&
-        (key.startsWith("class-progression:") || (group === "features" && key.startsWith("class-features:")))) {
+        (key.startsWith("class-progression:") ||
+          (group === "classes" && key.startsWith("class-level:")) ||
+          (group === "features" && key.startsWith("class-features:")))) {
       if (byStableKey.has(key)) {
         throw new Error(`The linked Actor contains duplicate Dragonmyth ${group} entries.`);
       }
@@ -39,7 +46,8 @@ export function managedEntryDocuments(documents, group, baseline) {
   const maximum = Math.max(baseline.length, ...[...byIndex.keys()].map((index) => index + 1));
   for (let index = 0; index < maximum; index += 1) {
     const baselineEntry = baseline[index] || {};
-    const stableKey = classProgressionSyncKey(baselineEntry) ||
+    const stableKey = classLevelSyncKey(baselineEntry) ||
+      classProgressionSyncKey(baselineEntry) ||
       (group === "features" ? classFeatureSyncKey(baselineEntry) : null);
     const document = stableKey ? byStableKey.get(stableKey) : byIndex.get(index);
     if (document) entries.push({ document, baseline: baselineEntry });

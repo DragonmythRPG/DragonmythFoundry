@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classFeatureSyncKey,
+  classLevelSyncKey,
   classProgressionSyncKey,
   getSyncFlag,
   managedEntryDocuments,
@@ -101,4 +102,20 @@ test("class progression grants retain stable Item and ActiveEffect identities", 
     .map(({ document }) => document.name), ["Manual item", "Bardic Inspiration"]);
   assert.deepEqual(managedEntryDocuments(effects, "effects", [baseline[2]])
     .map(({ document }) => document.name), ["Blessed"]);
+});
+
+test("multiclass Items keep stable class identities when class rows are removed or reordered", () => {
+  const baseline = [
+    { entryGlobalId: "class-barbarian", name: "Barbarian" },
+    { entryGlobalId: "class-rogue", name: "Rogue" },
+  ];
+  const documents = [...baseline].reverse().map((entry) => ({
+    name: entry.name,
+    flags: { [MODULE_ID]: { websiteSourceKey: classLevelSyncKey(entry) } },
+    getFlag(scope, key) { return this.flags[scope]?.[key]; },
+  }));
+  assert.deepEqual(managedEntryDocuments(documents, "classes", baseline)
+    .map(({ document }) => document.name), ["Barbarian", "Rogue"]);
+  assert.deepEqual(managedEntryDocuments(documents, "classes", [baseline[1]])
+    .map(({ document }) => document.name), ["Rogue"]);
 });
